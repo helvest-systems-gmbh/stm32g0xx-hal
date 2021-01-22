@@ -115,6 +115,29 @@ pub trait SerialExt<USART, Config> {
         RX: RxPin<USART>;
 }
 
+/// A type for handling half duplex abstraction
+pub struct HalfDuplex<USART, Config> {
+    pin: (Tx<USART, Config>, Rx<USART, Config>),
+    usart: USART,
+    _config: PhantomData<Config>,
+}
+
+// Serial TX pin configured for half-duplex single-wire mode
+pub trait HalfDuplexPin<USART> {
+    fn setup(&self);
+}
+
+pub trait HalfDuplexExt<USART, Config> {
+    fn half_duplex<PIN>(
+        self,
+        pin: PIN,
+        config: Config,
+        rcc: &mut Rcc,
+    ) -> Result<HalfDuplex<USART, Config>, InvalidConfig>
+    where
+        PIN: HalfDuplexPin<USART>;
+}
+
 impl<USART, Config> fmt::Write for Serial<USART, Config>
 where
     Serial<USART, Config>: hal::serial::Write<u8>,
@@ -137,7 +160,7 @@ where
 
 macro_rules! uart_shared {
     ($USARTX:ident, $dmamux_rx:ident, $dmamux_tx:ident,
-        tx: [ $(($PTX:ident, $TAF:expr),)+ ],
+        tx: [ $(($PTX:ident, $TAF:expr, $GPIOTX:ident, $txi:expr),)+ ],
         rx: [ $(($PRX:ident, $RAF:expr),)+ ]) => {
 
 
@@ -153,6 +176,27 @@ macro_rules! uart_shared {
             impl<MODE> RxPin<$USARTX> for $PRX<MODE> {
                 fn setup(&self) {
                     self.set_alt_mode($RAF)
+                }
+            }
+        )+
+
+        $(
+            impl<MODE> HalfDuplexPin<$USARTX> for $PTX<MODE> {
+                fn setup(&self) {
+                    self.set_alt_mode($TAF);
+                    unsafe {
+                        let gpio = &(*$GPIOTX::ptr());
+
+                        // No internal pull-up/pull-down
+                        gpio.pupdr.modify(|r, w| {
+                            w.bits(r.bits() & !(0b11 << ($txi * 2)))
+                        });
+
+                        // Open drain output
+                        gpio.otyper.modify(|r, w| {
+                            w.bits(r.bits() | (0b1 << $txi))
+                        });
+                    }
                 }
             }
         )+
@@ -206,6 +250,14 @@ macro_rules! uart_shared {
             }
         }
 
+        impl<Config> hal::serial::Read<u8> for HalfDuplex<$USARTX, Config> {
+            type Error = Error;
+
+            fn read(&mut self) -> nb::Result<u8, Error> {
+                self.pin.1.read()
+            }
+        }
+
         impl<Config> Tx<$USARTX, Config> {
 
             /// Starts listening for an interrupt event
@@ -256,6 +308,17 @@ macro_rules! uart_shared {
             }
         }
 
+        impl<Config> hal::serial::Write<u8> for HalfDuplex<$USARTX, Config> {
+            type Error = Error;
+
+            fn flush(&mut self) -> nb::Result<(), Self::Error> {
+                self.pin.0.flush()
+            }
+
+            fn write(&mut self, byte: u8) -> nb::Result<(), Self::Error> {
+                self.pin.0.write(byte)
+            }
+        }
 
         impl<Config> Serial<$USARTX, Config> {
 
@@ -263,6 +326,16 @@ macro_rules! uart_shared {
             /// receiving (Rx)
             pub fn split(self) -> (Tx<$USARTX, Config>, Rx<$USARTX, Config>) {
                 (self.tx, self.rx)
+            }
+
+        }
+
+        impl<Config> HalfDuplex<$USARTX, Config> {
+
+            /// Separates the serial struct into separate channel objects for sending (Tx) and
+            /// receiving (Rx)
+            pub fn split(self) -> (Tx<$USARTX, Config>, Rx<$USARTX, Config>) {
+                self.pin
             }
 
         }
@@ -333,6 +406,20 @@ macro_rules! uart_basic {
                 RX: RxPin<$USARTX>,
             {
                 Serial::$usartX(self, tx, rx, config, rcc)
+            }
+        }
+
+        impl HalfDuplexExt<$USARTX, BasicConfig> for $USARTX {
+            fn half_duplex<PIN>(
+                self,
+                pin: PIN,
+                config: BasicConfig,
+                rcc: &mut Rcc,
+            ) -> Result<HalfDuplex<$USARTX, BasicConfig>, InvalidConfig>
+            where
+                PIN: HalfDuplexPin<$USARTX>,
+            {
+                HalfDuplex::$usartX(self, pin, config, rcc)
             }
         }
 
@@ -439,6 +526,131 @@ macro_rules! uart_basic {
                     .write(|w| unsafe { w.bits(event.val() & mask) });
             }
         }
+
+        impl HalfDuplex<$USARTX, BasicConfig> {
+            pub fn $usartX<PIN>(
+                usart: $USARTX,
+                pin: PIN,
+                config: BasicConfig,
+                rcc: &mut Rcc,
+            ) -> Result<Self, InvalidConfig>
+            where
+                PIN: HalfDuplexPin<$USARTX>,
+            {
+                pin.setup();
+
+                // Enable clock for USART
+                rcc.rb.$apbXenr.modify(|_, w| w.$usartXen().set_bit());
+                let clk = rcc.clocks.apb_clk.0 as u64;
+                let bdr = config.baudrate.0 as u64;
+                let div = ($clk_mul * clk) / bdr;
+                usart.brr.write(|w| unsafe { w.bits(div as u32) });
+                // Reset other registers to disable advanced USART features
+                usart.cr2.reset();
+                usart.cr3.reset();
+
+                // Disable USART, there are many bits where UE=0 is required
+                usart.cr1.modify(|_, w| w.ue().clear_bit());
+
+                // Enable transmission and receiving
+                usart.cr1.write(|w| {
+                    w.m0()
+                        .bit(config.wordlength == WordLength::DataBits9)
+                        .m1()
+                        .bit(config.wordlength == WordLength::DataBits7)
+                        .pce()
+                        .bit(config.parity != Parity::ParityNone)
+                        .ps()
+                        .bit(config.parity == Parity::ParityOdd)
+                });
+                usart.cr2.write(|w| unsafe {
+                    w.stop().bits(match config.stopbits {
+                        StopBits::STOP1 => 0b00,
+                        StopBits::STOP0P5 => 0b01,
+                        StopBits::STOP2 => 0b10,
+                        StopBits::STOP1P5 => 0b11,
+                    })
+                });
+
+                // According to reference manual these bits must be kept
+                // cleared when using half-duplex single-wire mode
+                usart
+                    .cr2
+                    .modify(|_, w| w.linen().clear_bit().clken().clear_bit());
+                usart
+                    .cr3
+                    .modify(|_, w| w.iren().clear_bit().scen().clear_bit());
+
+                // hdsel bit enables half-duplex single-wire mode
+                usart.cr3.modify(|_, w| w.hdsel().set_bit());
+
+                // Enable USART
+                usart.cr1.modify(|_, w| w.ue().set_bit());
+
+                Ok(HalfDuplex {
+                    pin: (
+                        Tx {
+                            _usart: PhantomData,
+                            _config: PhantomData,
+                        },
+                        Rx {
+                            _usart: PhantomData,
+                            _config: PhantomData,
+                        },
+                    ),
+                    usart,
+                    _config: PhantomData,
+                })
+            }
+
+            pub fn enable_tx(&mut self) {
+                self.usart
+                    .cr1
+                    .modify(|_, w| w.te().clear_bit().re().clear_bit());
+                self.usart.cr1.modify(|_, w| w.te().set_bit());
+            }
+
+            pub fn enable_rx(&mut self) {
+                self.usart
+                    .cr1
+                    .modify(|_, w| w.te().clear_bit().re().clear_bit());
+                self.usart.cr1.modify(|_, w| w.re().set_bit());
+            }
+
+            /// Starts listening for an interrupt event
+            pub fn listen(&mut self, event: Event) {
+                match event {
+                    Event::Rxne => self.usart.cr1.modify(|_, w| w.rxneie().set_bit()),
+                    Event::Txe => self.usart.cr1.modify(|_, w| w.txeie().set_bit()),
+                    Event::Idle => self.usart.cr1.modify(|_, w| w.idleie().set_bit()),
+                    _ => {}
+                }
+            }
+
+            /// Stop listening for an interrupt event
+            pub fn unlisten(&mut self, event: Event) {
+                match event {
+                    Event::Rxne => self.usart.cr1.modify(|_, w| w.rxneie().clear_bit()),
+                    Event::Txe => self.usart.cr1.modify(|_, w| w.txeie().clear_bit()),
+                    Event::Idle => self.usart.cr1.modify(|_, w| w.idleie().clear_bit()),
+                    _ => {}
+                }
+            }
+
+            /// Check if interrupt event is pending
+            pub fn is_pending(&mut self, event: Event) -> bool {
+                (self.usart.isr.read().bits() & event.val()) != 0
+            }
+
+            /// Clear pending interrupt
+            pub fn unpend(&mut self, event: Event) {
+                // mask the allowed bits
+                let mask: u32 = 0x123BFF;
+                self.usart
+                    .icr
+                    .write(|w| unsafe { w.bits(event.val() & mask) });
+            }
+        }
     };
 }
 
@@ -459,6 +671,20 @@ macro_rules! uart_full {
                 RX: RxPin<$USARTX>,
             {
                 Serial::$usartX(self, tx, rx, config, rcc)
+            }
+        }
+
+        impl HalfDuplexExt<$USARTX, FullConfig> for $USARTX {
+            fn half_duplex<PIN>(
+                self,
+                pin: PIN,
+                config: FullConfig,
+                rcc: &mut Rcc,
+            ) -> Result<HalfDuplex<$USARTX, FullConfig>, InvalidConfig>
+            where
+                PIN: HalfDuplexPin<$USARTX>,
+            {
+                HalfDuplex::$usartX(self, pin, config, rcc)
             }
         }
 
@@ -578,6 +804,132 @@ macro_rules! uart_full {
                     .write(|w| unsafe { w.bits(event.val() & mask) });
             }
         }
+
+        impl HalfDuplex<$USARTX, FullConfig> {
+            pub fn $usartX<PIN>(
+                usart: $USARTX,
+                pin: PIN,
+                config: FullConfig,
+                rcc: &mut Rcc,
+            ) -> Result<Self, InvalidConfig>
+            where
+                PIN: HalfDuplexPin<$USARTX>,
+            {
+                pin.setup();
+
+                // Enable clock for USART
+                rcc.rb.$apbXenr.modify(|_, w| w.$usartXen().set_bit());
+                let clk = rcc.clocks.apb_clk.0 as u64;
+                let bdr = config.baudrate.0 as u64;
+                let div = ($clk_mul * clk) / bdr;
+                usart.brr.write(|w| unsafe { w.bits(div as u32) });
+                // Reset other registers to disable advanced USART features
+                usart.cr2.reset();
+                usart.cr3.reset();
+
+                // Disable USART, there are many bits where UE=0 is required
+                usart.cr1.modify(|_, w| w.ue().clear_bit());
+
+                // Enable transmission and receiving
+                usart.cr1.write(|w| {
+                    w.m0()
+                        .bit(config.wordlength == WordLength::DataBits9)
+                        .m1()
+                        .bit(config.wordlength == WordLength::DataBits7)
+                        .pce()
+                        .bit(config.parity != Parity::ParityNone)
+                        .ps()
+                        .bit(config.parity == Parity::ParityOdd)
+                });
+                usart.cr2.write(|w| unsafe {
+                    w.stop().bits(match config.stopbits {
+                        StopBits::STOP1 => 0b00,
+                        StopBits::STOP0P5 => 0b01,
+                        StopBits::STOP2 => 0b10,
+                        StopBits::STOP1P5 => 0b11,
+                    })
+                });
+
+                // According to reference manual these bits must be kept
+                // cleared when using half-duplex single-wire mode
+                usart
+                    .cr2
+                    .modify(|_, w| w.linen().clear_bit().clken().clear_bit());
+                usart
+                    .cr3
+                    .modify(|_, w| w.iren().clear_bit().scen().clear_bit());
+
+                // hdsel bit enables half-duplex single-wire mode
+                usart.cr3.modify(|_, w| w.hdsel().set_bit());
+
+                // Enable USART
+                usart.cr1.modify(|_, w| w.ue().set_bit());
+
+                Ok(HalfDuplex {
+                    pin: (
+                        Tx {
+                            _usart: PhantomData,
+                            _config: PhantomData,
+                        },
+                        Rx {
+                            _usart: PhantomData,
+                            _config: PhantomData,
+                        },
+                    ),
+                    usart,
+                    _config: PhantomData,
+                })
+            }
+
+            pub fn enable_tx(&mut self) {
+                self.usart
+                    .cr1
+                    .modify(|_, w| w.te().clear_bit().re().clear_bit());
+                self.usart.cr1.modify(|_, w| w.te().set_bit());
+            }
+
+            pub fn enable_rx(&mut self) {
+                self.usart
+                    .cr1
+                    .modify(|_, w| w.te().clear_bit().re().clear_bit());
+                self.usart.cr1.modify(|_, w| w.re().set_bit());
+            }
+
+            /// Starts listening for an interrupt event
+            pub fn listen(&mut self, event: Event) {
+                match event {
+                    Event::Rxne => self.usart.cr1.modify(|_, w| w.rxneie().set_bit()),
+                    Event::Txe => self.usart.cr1.modify(|_, w| w.txeie().set_bit()),
+                    Event::Idle => self.usart.cr1.modify(|_, w| w.idleie().set_bit()),
+                    _ => {}
+                }
+            }
+
+            /// Stop listening for an interrupt event
+            pub fn unlisten(&mut self, event: Event) {
+                match event {
+                    Event::Rxne => self.usart.cr1.modify(|_, w| w.rxneie().clear_bit()),
+                    Event::Txe => self.usart.cr1.modify(|_, w| w.txeie().clear_bit()),
+                    Event::Idle => self.usart.cr1.modify(|_, w| w.idleie().clear_bit()),
+                    _ => {}
+                }
+            }
+
+            /// Check if interrupt event is pending
+            pub fn is_pending(&mut self, event: Event) -> bool {
+                (self.usart.isr.read().bits() & event.val()) != 0
+            }
+
+            /// Clear pending interrupt
+            pub fn unpend(&mut self, event: Event) {
+                // mask the allowed bits
+                let mask: u32 = 0x123BFF;
+                self.usart
+                    .icr
+                    .write(|w| unsafe { w.bits(event.val() & mask) });
+            }
+        }
+
         impl Tx<$USARTX, FullConfig> {
             /// Returns true if the tx fifo threshold has been reached.
             pub fn fifo_threshold_reached(&self) -> bool {
@@ -611,9 +963,9 @@ macro_rules! uart_full {
 
 uart_shared!(USART1, USART1_RX, USART1_TX,
 tx: [
-    (PA9, AltFunction::AF1),
-    (PB6, AltFunction::AF0),
-    (PC4, AltFunction::AF1),
+    (PA9, AltFunction::AF1, GPIOA, 9),
+    (PB6, AltFunction::AF0, GPIOB, 6),
+    (PC4, AltFunction::AF1, GPIOC, 4),
 ],
 rx: [
     (PA10, AltFunction::AF1),
@@ -622,9 +974,9 @@ rx: [
 ]);
 uart_shared!(USART2, USART2_RX, USART2_TX,
     tx: [
-        (PA2, AltFunction::AF1),
-        (PA14, AltFunction::AF1),
-        (PD5, AltFunction::AF0),
+        (PA2, AltFunction::AF1, GPIOA, 2),
+        (PA14, AltFunction::AF1, GPIOA, 14),
+        (PD5, AltFunction::AF0, GPIOD, 5),
     ],
     rx: [
         (PA3, AltFunction::AF1),
@@ -636,13 +988,13 @@ uart_shared!(USART2, USART2_RX, USART2_TX,
 #[cfg(any(feature = "stm32g070", feature = "stm32g071", feature = "stm32g081"))]
 uart_shared!(USART3, USART3_RX, USART3_TX,
     tx: [
-        (PA5, AltFunction::AF4),
-        (PB2, AltFunction::AF4),
-        (PB8, AltFunction::AF4),
-        (PB10, AltFunction::AF4),
-        (PC4, AltFunction::AF1),
-        (PC10, AltFunction::AF1),
-        (PD8, AltFunction::AF1),
+        (PA5, AltFunction::AF4, GPIOA, 5),
+        (PB2, AltFunction::AF4, GPIOB, 2),
+        (PB8, AltFunction::AF4, GPIOB, 8),
+        (PB10, AltFunction::AF4, GPIOB, 10),
+        (PC4, AltFunction::AF1, GPIOC, 4),
+        (PC10, AltFunction::AF1, GPIOC, 10),
+        (PD8, AltFunction::AF1, GPIOD, 8),
     ],
     rx: [
         (PB0, AltFunction::AF4),
@@ -657,8 +1009,8 @@ uart_shared!(USART3, USART3_RX, USART3_TX,
 #[cfg(any(feature = "stm32g070", feature = "stm32g071", feature = "stm32g081"))]
 uart_shared!(USART4, USART4_RX, USART4_TX,
     tx: [
-        (PA0, AltFunction::AF4),
-        (PC10, AltFunction::AF1),
+        (PA0, AltFunction::AF4, GPIOA, 0),
+        (PC10, AltFunction::AF1, GPIOC, 10),
     ],
     rx: [
         (PC11, AltFunction::AF1),
@@ -669,9 +1021,9 @@ uart_shared!(USART4, USART4_RX, USART4_TX,
 #[cfg(feature = "stm32g0x1")]
 uart_shared!(LPUART, LPUART_RX, LPUART_TX,
     tx: [
-        (PA2, AltFunction::AF6),
-        (PB11, AltFunction::AF1),
-        (PC1, AltFunction::AF1),
+        (PA2, AltFunction::AF6, GPIOA, 2),
+        (PB11, AltFunction::AF1, GPIOB, 11),
+        (PC1, AltFunction::AF1, GPIOC, 1),
     ],
     rx: [
         (PA3, AltFunction::AF6),
