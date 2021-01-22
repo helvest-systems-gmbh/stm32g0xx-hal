@@ -464,6 +464,45 @@ macro_rules! gpio {
     }
 }
 
+macro_rules! half_duplex {
+    ($GPIOX:ident, $gpiox:ident, [$($PXi:ident : $i:expr,)+]) => {
+        $(
+            impl<MODE> $gpiox::$PXi<MODE> {
+                #[allow(dead_code)]
+                pub(crate) fn set_half_duplex(&self, mode: AltFunction) {
+                    use crate::stm32::$GPIOX;
+                    let mode = mode as u32;
+                    let offset = 2 * $i;
+                    let offset2 = 4 * $i;
+                    unsafe {
+                        let gpio = &(*$GPIOX::ptr());
+                        if offset2 < 32 {
+                            gpio.afrl.modify(|r, w| {
+                                w.bits((r.bits() & !(0b1111 << offset2)) | (mode << offset2))
+                            });
+                        } else {
+                            let offset2 = offset2 - 32;
+                            gpio.afrh.modify(|r, w| {
+                                w.bits((r.bits() & !(0b1111 << offset2)) | (mode << offset2))
+                            });
+                        }
+
+                        gpio.moder
+                            .modify(|r, w| w.bits((r.bits() & !(0b11 << offset)) | (0b10 << offset)));
+
+                        // No internal pull-up/pull-down
+                        gpio.pupdr
+                            .modify(|r, w| w.bits(r.bits() & !(0b11 << offset)));
+
+                        // Open drain output
+                        gpio.otyper.modify(|r, w| w.bits(r.bits() | (0b1 << $i)));
+                    }
+                }
+            }
+        )+
+    };
+}
+
 gpio!(GPIOA, gpioa, iopaen, PA, 0, [
     PA0: (pa0, 0),
     PA1: (pa1, 1),
@@ -481,6 +520,14 @@ gpio!(GPIOA, gpioa, iopaen, PA, 0, [
     PA13: (pa13, 13),
     PA14: (pa14, 14),
     PA15: (pa15, 15),
+]);
+
+half_duplex!(GPIOA, gpioa, [
+    PA0: 0,
+    PA2: 2,
+    PA5: 5,
+    PA9: 9,
+    PA14: 14,
 ]);
 
 gpio!(GPIOB, gpiob, iopben, PB, 1, [
@@ -502,6 +549,14 @@ gpio!(GPIOB, gpiob, iopben, PB, 1, [
     PB15: (pb15, 15),
 ]);
 
+half_duplex!(GPIOB, gpiob, [
+    PB2: 2,
+    PB6: 6,
+    PB8: 8,
+    PB10: 10,
+    PB11: 11,
+]);
+
 gpio!(GPIOC, gpioc, iopcen, PC, 2, [
     PC0: (pc0, 0),
     PC1: (pc1, 1),
@@ -519,6 +574,12 @@ gpio!(GPIOC, gpioc, iopcen, PC, 2, [
     PC13: (pc13, 13),
     PC14: (pc14, 14),
     PC15: (pc15, 15),
+]);
+
+half_duplex!(GPIOC, gpioc, [
+    PC1: 1,
+    PC4: 4,
+    PC10: 10,
 ]);
 
 gpio!(GPIOD, gpiod, iopden, PD, 3, [
@@ -540,6 +601,11 @@ gpio!(GPIOD, gpiod, iopden, PD, 3, [
     PD15: (pd15, 15),
 ]);
 
+half_duplex!(GPIOD, gpiod, [
+    PD5: 5,
+    PD8: 8,
+]);
+    
 gpio!(GPIOF, gpiof, iopfen, PF, 5, [
     PF0: (pf0, 0),
     PF1: (pf1, 1),
@@ -558,3 +624,4 @@ gpio!(GPIOF, gpiof, iopfen, PF, 5, [
     PF14: (pf14, 14),
     PF15: (pf15, 15),
 ]);
+
