@@ -95,6 +95,7 @@ pub struct Serial<USART, Config> {
 // Serial TX pin
 pub trait TxPin<USART> {
     fn setup(&self);
+    fn setup_half(&self);
 }
 
 // Serial RX pin
@@ -113,29 +114,15 @@ pub trait SerialExt<USART, Config> {
     where
         TX: TxPin<USART>,
         RX: RxPin<USART>;
-}
 
-/// A type for handling half duplex abstraction
-pub struct HalfDuplex<USART, Config> {
-    pin: (Tx<USART, Config>, Rx<USART, Config>),
-    usart: USART,
-    _config: PhantomData<Config>,
-}
-
-// Serial TX pin configured for half-duplex single-wire mode
-pub trait HalfDuplexPin<USART> {
-    fn setup(&self);
-}
-
-pub trait HalfDuplexExt<USART, Config> {
-    fn half_duplex<PIN>(
+    fn half<TX>(
         self,
-        pin: PIN,
+        tx: TX,
         config: Config,
         rcc: &mut Rcc,
-    ) -> Result<HalfDuplex<USART, Config>, InvalidConfig>
+    ) -> Result<Serial<USART, Config>, InvalidConfig>
     where
-        PIN: HalfDuplexPin<USART>;
+        TX: TxPin<USART>;
 }
 
 impl<USART, Config> fmt::Write for Serial<USART, Config>
@@ -167,7 +154,11 @@ macro_rules! uart_shared {
         $(
             impl<MODE> TxPin<$USARTX> for $PTX<MODE> {
                 fn setup(&self) {
-                    self.set_alt_mode($TAF)
+                    self.set_alt_mode($TAF);
+                }
+
+                fn setup_half(&self) {
+                    self.set_half_duplex($TAF);
                 }
             }
         )+
@@ -176,14 +167,6 @@ macro_rules! uart_shared {
             impl<MODE> RxPin<$USARTX> for $PRX<MODE> {
                 fn setup(&self) {
                     self.set_alt_mode($RAF)
-                }
-            }
-        )+
-
-        $(
-            impl<MODE> HalfDuplexPin<$USARTX> for $PTX<MODE> {
-                fn setup(&self) {
-                    self.set_half_duplex($TAF);
                 }
             }
         )+
@@ -237,14 +220,6 @@ macro_rules! uart_shared {
             }
         }
 
-        impl<Config> hal::serial::Read<u8> for HalfDuplex<$USARTX, Config> {
-            type Error = Error;
-
-            fn read(&mut self) -> nb::Result<u8, Error> {
-                self.pin.1.read()
-            }
-        }
-
         impl<Config> Tx<$USARTX, Config> {
 
             /// Starts listening for an interrupt event
@@ -295,34 +270,12 @@ macro_rules! uart_shared {
             }
         }
 
-        impl<Config> hal::serial::Write<u8> for HalfDuplex<$USARTX, Config> {
-            type Error = Error;
-
-            fn flush(&mut self) -> nb::Result<(), Self::Error> {
-                self.pin.0.flush()
-            }
-
-            fn write(&mut self, byte: u8) -> nb::Result<(), Self::Error> {
-                self.pin.0.write(byte)
-            }
-        }
-
         impl<Config> Serial<$USARTX, Config> {
 
             /// Separates the serial struct into separate channel objects for sending (Tx) and
             /// receiving (Rx)
             pub fn split(self) -> (Tx<$USARTX, Config>, Rx<$USARTX, Config>) {
                 (self.tx, self.rx)
-            }
-
-        }
-
-        impl<Config> HalfDuplex<$USARTX, Config> {
-
-            /// Separates the serial struct into separate channel objects for sending (Tx) and
-            /// receiving (Rx)
-            pub fn split(self) -> (Tx<$USARTX, Config>, Rx<$USARTX, Config>) {
-                self.pin
             }
 
         }
@@ -378,7 +331,7 @@ macro_rules! uart_shared {
 
 macro_rules! uart_basic {
     ($USARTX:ident,
-        $usartX:ident, $apbXenr:ident, $usartXen:ident, $clk_mul:expr
+        $usartX:ident, $halfX:ident, $apbXenr:ident, $usartXen:ident, $clk_mul:expr
     ) => {
         impl SerialExt<$USARTX, BasicConfig> for $USARTX {
             fn usart<TX, RX>(
@@ -394,19 +347,17 @@ macro_rules! uart_basic {
             {
                 Serial::$usartX(self, tx, rx, config, rcc)
             }
-        }
 
-        impl HalfDuplexExt<$USARTX, BasicConfig> for $USARTX {
-            fn half_duplex<PIN>(
+            fn half<TX>(
                 self,
-                pin: PIN,
+                tx: TX,
                 config: BasicConfig,
                 rcc: &mut Rcc,
-            ) -> Result<HalfDuplex<$USARTX, BasicConfig>, InvalidConfig>
+            ) -> Result<Serial<$USARTX, BasicConfig>, InvalidConfig>
             where
-                PIN: HalfDuplexPin<$USARTX>,
+                TX: TxPin<$USARTX>,
             {
-                HalfDuplex::$usartX(self, pin, config, rcc)
+                Serial::$halfX(self, tx, config, rcc)
             }
         }
 
@@ -479,52 +430,16 @@ macro_rules! uart_basic {
                 })
             }
 
-            /// Starts listening for an interrupt event
-            pub fn listen(&mut self, event: Event) {
-                match event {
-                    Event::Rxne => self.usart.cr1.modify(|_, w| w.rxneie().set_bit()),
-                    Event::Txe => self.usart.cr1.modify(|_, w| w.txeie().set_bit()),
-                    Event::Idle => self.usart.cr1.modify(|_, w| w.idleie().set_bit()),
-                    _ => {}
-                }
-            }
-
-            /// Stop listening for an interrupt event
-            pub fn unlisten(&mut self, event: Event) {
-                match event {
-                    Event::Rxne => self.usart.cr1.modify(|_, w| w.rxneie().clear_bit()),
-                    Event::Txe => self.usart.cr1.modify(|_, w| w.txeie().clear_bit()),
-                    Event::Idle => self.usart.cr1.modify(|_, w| w.idleie().clear_bit()),
-                    _ => {}
-                }
-            }
-
-            /// Check if interrupt event is pending
-            pub fn is_pending(&mut self, event: Event) -> bool {
-                (self.usart.isr.read().bits() & event.val()) != 0
-            }
-
-            /// Clear pending interrupt
-            pub fn unpend(&mut self, event: Event) {
-                // mask the allowed bits
-                let mask: u32 = 0x123BFF;
-                self.usart
-                    .icr
-                    .write(|w| unsafe { w.bits(event.val() & mask) });
-            }
-        }
-
-        impl HalfDuplex<$USARTX, BasicConfig> {
-            pub fn $usartX<PIN>(
+            pub fn $halfX<TX>(
                 usart: $USARTX,
-                pin: PIN,
+                tx: TX,
                 config: BasicConfig,
                 rcc: &mut Rcc,
             ) -> Result<Self, InvalidConfig>
             where
-                PIN: HalfDuplexPin<$USARTX>,
+                TX: TxPin<$USARTX>,
             {
-                pin.setup();
+                tx.setup_half();
 
                 // Enable clock for USART
                 rcc.rb.$apbXenr.modify(|_, w| w.$usartXen().set_bit());
@@ -550,6 +465,7 @@ macro_rules! uart_basic {
                         .ps()
                         .bit(config.parity == Parity::ParityOdd)
                 });
+
                 usart.cr2.write(|w| unsafe {
                     w.stop().bits(match config.stopbits {
                         StopBits::STOP1 => 0b00,
@@ -574,34 +490,18 @@ macro_rules! uart_basic {
                 // Enable USART
                 usart.cr1.modify(|_, w| w.ue().set_bit());
 
-                Ok(HalfDuplex {
-                    pin: (
-                        Tx {
-                            _usart: PhantomData,
-                            _config: PhantomData,
-                        },
-                        Rx {
-                            _usart: PhantomData,
-                            _config: PhantomData,
-                        },
-                    ),
+                Ok(Serial {
+                    tx: Tx {
+                        _usart: PhantomData,
+                        _config: PhantomData,
+                    },
+                    rx: Rx {
+                        _usart: PhantomData,
+                        _config: PhantomData,
+                    },
                     usart,
                     _config: PhantomData,
                 })
-            }
-
-            pub fn enable_tx(&mut self) {
-                self.usart
-                    .cr1
-                    .modify(|_, w| w.te().clear_bit().re().clear_bit());
-                self.usart.cr1.modify(|_, w| w.te().set_bit());
-            }
-
-            pub fn enable_rx(&mut self) {
-                self.usart
-                    .cr1
-                    .modify(|_, w| w.te().clear_bit().re().clear_bit());
-                self.usart.cr1.modify(|_, w| w.re().set_bit());
             }
 
             /// Starts listening for an interrupt event
@@ -637,13 +537,29 @@ macro_rules! uart_basic {
                     .icr
                     .write(|w| unsafe { w.bits(event.val() & mask) });
             }
+
+            pub fn tx_on(&mut self) {
+                self.usart.cr1.modify(|_, w| w.te().set_bit());
+            }
+
+            pub fn tx_off(&mut self) {
+                self.usart.cr1.modify(|_, w| w.te().clear_bit());
+            }
+
+            pub fn rx_on(&mut self) {
+                self.usart.cr1.modify(|_, w| w.re().set_bit());
+            }
+
+            pub fn rx_off(&mut self) {
+                self.usart.cr1.modify(|_, w| w.re().clear_bit());
+            }
         }
     };
 }
 
 macro_rules! uart_full {
     ($USARTX:ident,
-        $usartX:ident, $apbXenr:ident, $usartXen:ident, $clk_mul:expr
+        $usartX:ident, $halfX:ident, $apbXenr:ident, $usartXen:ident, $clk_mul:expr
     ) => {
         impl SerialExt<$USARTX, FullConfig> for $USARTX {
             fn usart<TX, RX>(
@@ -659,19 +575,17 @@ macro_rules! uart_full {
             {
                 Serial::$usartX(self, tx, rx, config, rcc)
             }
-        }
 
-        impl HalfDuplexExt<$USARTX, FullConfig> for $USARTX {
-            fn half_duplex<PIN>(
+            fn half<TX>(
                 self,
-                pin: PIN,
+                tx: TX,
                 config: FullConfig,
                 rcc: &mut Rcc,
-            ) -> Result<HalfDuplex<$USARTX, FullConfig>, InvalidConfig>
+            ) -> Result<Serial<$USARTX, FullConfig>, InvalidConfig>
             where
-                PIN: HalfDuplexPin<$USARTX>,
+                TX: TxPin<$USARTX>,
             {
-                HalfDuplex::$usartX(self, pin, config, rcc)
+                Serial::$halfX(self, tx, config, rcc)
             }
         }
 
@@ -757,52 +671,16 @@ macro_rules! uart_full {
                 })
             }
 
-            /// Starts listening for an interrupt event
-            pub fn listen(&mut self, event: Event) {
-                match event {
-                    Event::Rxne => self.usart.cr1.modify(|_, w| w.rxneie().set_bit()),
-                    Event::Txe => self.usart.cr1.modify(|_, w| w.txeie().set_bit()),
-                    Event::Idle => self.usart.cr1.modify(|_, w| w.idleie().set_bit()),
-                    _ => {}
-                }
-            }
-
-            /// Stop listening for an interrupt event
-            pub fn unlisten(&mut self, event: Event) {
-                match event {
-                    Event::Rxne => self.usart.cr1.modify(|_, w| w.rxneie().clear_bit()),
-                    Event::Txe => self.usart.cr1.modify(|_, w| w.txeie().clear_bit()),
-                    Event::Idle => self.usart.cr1.modify(|_, w| w.idleie().clear_bit()),
-                    _ => {}
-                }
-            }
-
-            /// Check if interrupt event is pending
-            pub fn is_pending(&mut self, event: Event) -> bool {
-                (self.usart.isr.read().bits() & event.val()) != 0
-            }
-
-            /// Clear pending interrupt
-            pub fn unpend(&mut self, event: Event) {
-                // mask the allowed bits
-                let mask: u32 = 0x123BFF;
-                self.usart
-                    .icr
-                    .write(|w| unsafe { w.bits(event.val() & mask) });
-            }
-        }
-
-        impl HalfDuplex<$USARTX, FullConfig> {
-            pub fn $usartX<PIN>(
+            pub fn $halfX<TX>(
                 usart: $USARTX,
-                pin: PIN,
+                tx: TX,
                 config: FullConfig,
                 rcc: &mut Rcc,
             ) -> Result<Self, InvalidConfig>
             where
-                PIN: HalfDuplexPin<$USARTX>,
+                TX: TxPin<$USARTX>,
             {
-                pin.setup();
+                tx.setup_half();
 
                 // Enable clock for USART
                 rcc.rb.$apbXenr.modify(|_, w| w.$usartXen().set_bit());
@@ -828,6 +706,7 @@ macro_rules! uart_full {
                         .ps()
                         .bit(config.parity == Parity::ParityOdd)
                 });
+
                 usart.cr2.write(|w| unsafe {
                     w.stop().bits(match config.stopbits {
                         StopBits::STOP1 => 0b00,
@@ -852,34 +731,18 @@ macro_rules! uart_full {
                 // Enable USART
                 usart.cr1.modify(|_, w| w.ue().set_bit());
 
-                Ok(HalfDuplex {
-                    pin: (
-                        Tx {
-                            _usart: PhantomData,
-                            _config: PhantomData,
-                        },
-                        Rx {
-                            _usart: PhantomData,
-                            _config: PhantomData,
-                        },
-                    ),
+                Ok(Serial {
+                    tx: Tx {
+                        _usart: PhantomData,
+                        _config: PhantomData,
+                    },
+                    rx: Rx {
+                        _usart: PhantomData,
+                        _config: PhantomData,
+                    },
                     usart,
                     _config: PhantomData,
                 })
-            }
-
-            pub fn enable_tx(&mut self) {
-                self.usart
-                    .cr1
-                    .modify(|_, w| w.te().clear_bit().re().clear_bit());
-                self.usart.cr1.modify(|_, w| w.te().set_bit());
-            }
-
-            pub fn enable_rx(&mut self) {
-                self.usart
-                    .cr1
-                    .modify(|_, w| w.te().clear_bit().re().clear_bit());
-                self.usart.cr1.modify(|_, w| w.re().set_bit());
             }
 
             /// Starts listening for an interrupt event
@@ -914,6 +777,22 @@ macro_rules! uart_full {
                 self.usart
                     .icr
                     .write(|w| unsafe { w.bits(event.val() & mask) });
+            }
+
+            pub fn tx_on(&mut self) {
+                self.usart.cr1.modify(|_, w| w.te().set_bit());
+            }
+
+            pub fn tx_off(&mut self) {
+                self.usart.cr1.modify(|_, w| w.te().clear_bit());
+            }
+
+            pub fn rx_on(&mut self) {
+                self.usart.cr1.modify(|_, w| w.re().set_bit());
+            }
+
+            pub fn rx_off(&mut self) {
+                self.usart.cr1.modify(|_, w| w.re().clear_bit());
             }
         }
 
@@ -1019,13 +898,13 @@ uart_shared!(LPUART, LPUART_RX, LPUART_TX,
     ]
 );
 
-uart_full!(USART1, usart1, apbenr2, usart1en, 1);
+uart_full!(USART1, usart1, half1, apbenr2, usart1en, 1);
 
 #[cfg(any(feature = "stm32g070", feature = "stm32g071", feature = "stm32g081"))]
 uart_full!(USART2, usart2, apbenr1, usart2en, 1);
 
 #[cfg(any(feature = "stm32g030", feature = "stm32g031", feature = "stm32g041"))]
-uart_basic!(USART2, usart2, apbenr1, usart2en, 1);
+uart_basic!(USART2, usart2, half2, apbenr1, usart2en, 1);
 
 #[cfg(any(feature = "stm32g070", feature = "stm32g071", feature = "stm32g081"))]
 uart_basic!(USART3, usart3, apbenr1, usart3en, 1);
