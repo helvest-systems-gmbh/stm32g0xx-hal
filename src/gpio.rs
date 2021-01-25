@@ -464,7 +464,7 @@ macro_rules! gpio {
     }
 }
 
-macro_rules! half_duplex {
+macro_rules! half_duplex_gpio {
     ($GPIOX:ident, $gpiox:ident, [$($PXi:ident : $i:expr,)+]) => {
         $(
             impl<MODE> $gpiox::$PXi<MODE> {
@@ -522,7 +522,7 @@ gpio!(GPIOA, gpioa, iopaen, PA, 0, [
     PA15: (pa15, 15),
 ]);
 
-half_duplex!(GPIOA, gpioa, [
+half_duplex_gpio!(GPIOA, gpioa, [
     PA0: 0,
     PA2: 2,
     PA5: 5,
@@ -549,7 +549,7 @@ gpio!(GPIOB, gpiob, iopben, PB, 1, [
     PB15: (pb15, 15),
 ]);
 
-half_duplex!(GPIOB, gpiob, [
+half_duplex_gpio!(GPIOB, gpiob, [
     PB2: 2,
     PB6: 6,
     PB8: 8,
@@ -576,7 +576,7 @@ gpio!(GPIOC, gpioc, iopcen, PC, 2, [
     PC15: (pc15, 15),
 ]);
 
-half_duplex!(GPIOC, gpioc, [
+half_duplex_gpio!(GPIOC, gpioc, [
     PC1: 1,
     PC4: 4,
     PC10: 10,
@@ -601,11 +601,11 @@ gpio!(GPIOD, gpiod, iopden, PD, 3, [
     PD15: (pd15, 15),
 ]);
 
-half_duplex!(GPIOD, gpiod, [
+half_duplex_gpio!(GPIOD, gpiod, [
     PD5: 5,
     PD8: 8,
 ]);
-    
+
 gpio!(GPIOF, gpiof, iopfen, PF, 5, [
     PF0: (pf0, 0),
     PF1: (pf1, 1),
@@ -624,4 +624,3 @@ gpio!(GPIOF, gpiof, iopfen, PF, 5, [
     PF14: (pf14, 14),
     PF15: (pf15, 15),
 ]);
-
