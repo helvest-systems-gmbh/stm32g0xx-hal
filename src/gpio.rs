@@ -487,15 +487,15 @@ macro_rules! half_duplex_gpio {
                             });
                         }
 
-                        gpio.moder
-                            .modify(|r, w| w.bits((r.bits() & !(0b11 << offset)) | (0b10 << offset)));
-
                         // No internal pull-up/pull-down
                         gpio.pupdr
                             .modify(|r, w| w.bits(r.bits() & !(0b11 << offset)));
 
                         // Open drain output
                         gpio.otyper.modify(|r, w| w.bits(r.bits() | (0b1 << $i)));
+
+                        gpio.moder
+                            .modify(|r, w| w.bits((r.bits() & !(0b11 << offset)) | (0b10 << offset)));
                     }
                 }
             }
