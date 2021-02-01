@@ -182,6 +182,16 @@ macro_rules! uart_shared {
                 let usart = unsafe { &(*$USARTX::ptr()) };
                 usart.cr1.modify(|_, w| w.rxneie().clear_bit());
             }
+
+            pub fn enable(&mut self) {
+                let usart = unsafe { &(*$USARTX::ptr()) };
+                usart.cr1.modify(|_, w| w.te().clear_bit().re().set_bit());
+            }
+
+            pub fn disable(&mut self) {
+                let usart = unsafe { &(*$USARTX::ptr()) };
+                usart.cr1.modify(|_, w| w.re().clear_bit());
+            }
         }
 
         impl<Config> hal::serial::Read<u8> for Rx<$USARTX, Config> {
@@ -232,6 +242,16 @@ macro_rules! uart_shared {
             pub fn unlisten(&mut self) {
                 let usart = unsafe { &(*$USARTX::ptr()) };
                 usart.cr1.modify(|_, w| w.txeie().clear_bit());
+            }
+
+            pub fn enable(&mut self) {
+                let usart = unsafe { &(*$USARTX::ptr()) };
+                usart.cr1.modify(|_, w| w.re().clear_bit().te().set_bit());
+            }
+
+            pub fn disable(&mut self) {
+                let usart = unsafe { &(*$USARTX::ptr()) };
+                usart.cr1.modify(|_, w| w.te().clear_bit());
             }
         }
 
@@ -464,6 +484,10 @@ macro_rules! uart_basic {
                         .bit(config.parity != Parity::ParityNone)
                         .ps()
                         .bit(config.parity == Parity::ParityOdd)
+                        .te()
+                        .clear_bit()
+                        .re()
+                        .clear_bit()
                 });
 
                 usart.cr2.write(|w| unsafe {
@@ -538,19 +562,19 @@ macro_rules! uart_basic {
                     .write(|w| unsafe { w.bits(event.val() & mask) });
             }
 
-            pub fn tx_on(&mut self) {
+            pub fn enable_tx(&mut self) {
                 self.usart.cr1.modify(|_, w| w.te().set_bit());
             }
 
-            pub fn tx_off(&mut self) {
+            pub fn disable_tx(&mut self) {
                 self.usart.cr1.modify(|_, w| w.te().clear_bit());
             }
 
-            pub fn rx_on(&mut self) {
+            pub fn enable_rx(&mut self) {
                 self.usart.cr1.modify(|_, w| w.re().set_bit());
             }
 
-            pub fn rx_off(&mut self) {
+            pub fn disable_rx(&mut self) {
                 self.usart.cr1.modify(|_, w| w.re().clear_bit());
             }
         }
@@ -684,36 +708,53 @@ macro_rules! uart_full {
 
                 // Enable clock for USART
                 rcc.rb.$apbXenr.modify(|_, w| w.$usartXen().set_bit());
+
                 let clk = rcc.clocks.apb_clk.0 as u64;
                 let bdr = config.baudrate.0 as u64;
-                let div = ($clk_mul * clk) / bdr;
+                let clk_mul = 1;
+                let div = (clk_mul * clk) / bdr;
                 usart.brr.write(|w| unsafe { w.bits(div as u32) });
-                // Reset other registers to disable advanced USART features
+
+                usart.cr1.reset();
                 usart.cr2.reset();
                 usart.cr3.reset();
 
-                // Disable USART, there are many bits where UE=0 is required
-                usart.cr1.modify(|_, w| w.ue().clear_bit());
+                usart
+                    .cr2
+                    .write(|w| unsafe { w.stop().bits(config.stopbits.bits()) });
 
-                // Enable transmission and receiving
-                usart.cr1.write(|w| {
-                    w.m0()
-                        .bit(config.wordlength == WordLength::DataBits9)
-                        .m1()
+                if let Some(timeout) = config.receiver_timeout {
+                    usart.cr1.write(|w| w.rtoie().set_bit());
+                    usart.cr2.modify(|_, w| w.rtoen().set_bit());
+                    usart.rtor.write(|w| unsafe { w.rto().bits(timeout) });
+                }
+
+                usart.cr3.write(|w| unsafe {
+                    w.txftcfg()
+                        .bits(config.tx_fifo_threshold.bits())
+                        .rxftcfg()
+                        .bits(config.rx_fifo_threshold.bits())
+                        .txftie()
+                        .bit(config.tx_fifo_interrupt)
+                        .rxftie()
+                        .bit(config.rx_fifo_interrupt)
+                });
+
+                usart.cr1.modify(|_, w| {
+                    w.te()
+                        .clear_bit()
+                        .re()
+                        .clear_bit()
+                        .m0()
                         .bit(config.wordlength == WordLength::DataBits7)
+                        .m1()
+                        .bit(config.wordlength == WordLength::DataBits9)
                         .pce()
                         .bit(config.parity != Parity::ParityNone)
                         .ps()
                         .bit(config.parity == Parity::ParityOdd)
-                });
-
-                usart.cr2.write(|w| unsafe {
-                    w.stop().bits(match config.stopbits {
-                        StopBits::STOP1 => 0b00,
-                        StopBits::STOP0P5 => 0b01,
-                        StopBits::STOP2 => 0b10,
-                        StopBits::STOP1P5 => 0b11,
-                    })
+                        .fifoen()
+                        .bit(config.fifo_enable)
                 });
 
                 // According to reference manual these bits must be kept
@@ -779,19 +820,19 @@ macro_rules! uart_full {
                     .write(|w| unsafe { w.bits(event.val() & mask) });
             }
 
-            pub fn tx_on(&mut self) {
+            pub fn enable_tx(&mut self) {
                 self.usart.cr1.modify(|_, w| w.te().set_bit());
             }
 
-            pub fn tx_off(&mut self) {
+            pub fn disable_tx(&mut self) {
                 self.usart.cr1.modify(|_, w| w.te().clear_bit());
             }
 
-            pub fn rx_on(&mut self) {
+            pub fn enable_rx(&mut self) {
                 self.usart.cr1.modify(|_, w| w.re().set_bit());
             }
 
-            pub fn rx_off(&mut self) {
+            pub fn disable_rx(&mut self) {
                 self.usart.cr1.modify(|_, w| w.re().clear_bit());
             }
         }
