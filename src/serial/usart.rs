@@ -182,6 +182,16 @@ macro_rules! uart_shared {
                 let usart = unsafe { &(*$USARTX::ptr()) };
                 usart.cr1.modify(|_, w| w.rxneie().clear_bit());
             }
+
+            pub fn enable(&mut self) {
+                let usart = unsafe { &(*$USARTX::ptr()) };
+                usart.cr1.modify(|_, w| w.re().set_bit());
+            }
+
+            pub fn disable(&mut self) {
+                let usart = unsafe { &(*$USARTX::ptr()) };
+                usart.cr1.modify(|_, w| w.re().clear_bit());
+            }
         }
 
         impl<Config> hal::serial::Read<u8> for Rx<$USARTX, Config> {
@@ -232,6 +242,16 @@ macro_rules! uart_shared {
             pub fn unlisten(&mut self) {
                 let usart = unsafe { &(*$USARTX::ptr()) };
                 usart.cr1.modify(|_, w| w.txeie().clear_bit());
+            }
+
+            pub fn enable(&mut self) {
+                let usart = unsafe { &(*$USARTX::ptr()) };
+                usart.cr1.modify(|_, w| w.te().set_bit());
+            }
+
+            pub fn disable(&mut self) {
+                let usart = unsafe { &(*$USARTX::ptr()) };
+                usart.cr1.modify(|_, w| w.te().clear_bit());
             }
         }
 
@@ -538,19 +558,19 @@ macro_rules! uart_basic {
                     .write(|w| unsafe { w.bits(event.val() & mask) });
             }
 
-            pub fn tx_on(&mut self) {
+            pub fn enable_tx(&mut self) {
                 self.usart.cr1.modify(|_, w| w.te().set_bit());
             }
 
-            pub fn tx_off(&mut self) {
+            pub fn disable_tx(&mut self) {
                 self.usart.cr1.modify(|_, w| w.te().clear_bit());
             }
 
-            pub fn rx_on(&mut self) {
+            pub fn enable_rx(&mut self) {
                 self.usart.cr1.modify(|_, w| w.re().set_bit());
             }
 
-            pub fn rx_off(&mut self) {
+            pub fn disable_rx(&mut self) {
                 self.usart.cr1.modify(|_, w| w.re().clear_bit());
             }
         }
@@ -779,19 +799,19 @@ macro_rules! uart_full {
                     .write(|w| unsafe { w.bits(event.val() & mask) });
             }
 
-            pub fn tx_on(&mut self) {
+            pub fn enable_tx(&mut self) {
                 self.usart.cr1.modify(|_, w| w.te().set_bit());
             }
 
-            pub fn tx_off(&mut self) {
+            pub fn disable_tx(&mut self) {
                 self.usart.cr1.modify(|_, w| w.te().clear_bit());
             }
 
-            pub fn rx_on(&mut self) {
+            pub fn enable_rx(&mut self) {
                 self.usart.cr1.modify(|_, w| w.re().set_bit());
             }
 
-            pub fn rx_off(&mut self) {
+            pub fn disable_rx(&mut self) {
                 self.usart.cr1.modify(|_, w| w.re().clear_bit());
             }
         }
